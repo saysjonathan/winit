@@ -39,13 +39,13 @@ pub trait WindowExtMacOS {
     /// Sets whether or not the window has shadow.
     fn set_has_shadow(&self, has_shadow: bool);
 
-    /// Toggles the `Option` key being interpretted as an `Alt` modifier.
+    /// Sets whether the Option key can be used for alternative keyboard input.
     ///
-    /// This will ignore diacritical marks and accent characters from
-    /// being processed as received characters. Instead, the input
-    /// device's raw character will be placed in event queues with the
-    /// Alt modifier set.
-    fn set_option_as_alt(&self, option_as_alt: bool);
+    /// When set to `true`, the option key can be used like AltGr to input
+    /// additional characters and dead keys.
+    ///
+    /// By default, alternative keyboard input is enabled.
+    fn set_option_alternative_input(&self, option_alternative_input: bool);
 }
 
 impl WindowExtMacOS for Window {
@@ -80,8 +80,8 @@ impl WindowExtMacOS for Window {
     }
 
     #[inline]
-    fn set_option_as_alt(&self, option_as_alt: bool) {
-        self.window.set_option_as_alt(option_as_alt)
+    fn set_option_alternative_input(&self, option_alternative_input: bool) {
+        self.window.set_option_alternative_input(option_alternative_input)
     }
 }
 
@@ -132,7 +132,11 @@ pub trait WindowBuilderExtMacOS {
     fn with_resize_increments(self, increments: LogicalSize<f64>) -> WindowBuilder;
     fn with_disallow_hidpi(self, disallow_hidpi: bool) -> WindowBuilder;
     fn with_has_shadow(self, has_shadow: bool) -> WindowBuilder;
-    fn with_ignore_alt_modifier(self, ignore_alt_modifier: bool) -> WindowBuilder;
+
+    /// Sets whether the Option key can be used for alternative keyboard input.
+    ///
+    /// See [`WindowExtMacOs::set_option_alternative_input`] for details.
+    fn with_option_alternative_input(self, option_alternative_input: bool) -> WindowBuilder;
 }
 
 impl WindowBuilderExtMacOS for WindowBuilder {
@@ -200,8 +204,8 @@ impl WindowBuilderExtMacOS for WindowBuilder {
     }
 
     #[inline]
-    fn with_ignore_alt_modifier(mut self, ignore_alt_modifier: bool) -> WindowBuilder {
-        self.platform_specific.ignore_alt_modifier = ignore_alt_modifier;
+    fn with_option_alternative_input(mut self, option_alternative_input: bool) -> WindowBuilder {
+        self.platform_specific.option_alternative_input = option_alternative_input;
         self
     }
 }

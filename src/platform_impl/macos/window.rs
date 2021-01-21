@@ -24,7 +24,7 @@ use crate::{
         monitor::{self, MonitorHandle, VideoMode},
         util::{self, IdRef},
         view::CursorState,
-        view::{self, new_view, set_option_as_alt},
+        view::{self, new_view, set_option_alternative_input},
         window_delegate::new_delegate,
         OsError,
     },
@@ -74,7 +74,7 @@ pub struct PlatformSpecificWindowBuilderAttributes {
     pub resize_increments: Option<LogicalSize<f64>>,
     pub disallow_hidpi: bool,
     pub has_shadow: bool,
-    pub ignore_alt_modifier: bool,
+    pub option_alternative_input: bool,
 }
 
 impl Default for PlatformSpecificWindowBuilderAttributes {
@@ -91,7 +91,7 @@ impl Default for PlatformSpecificWindowBuilderAttributes {
             resize_increments: None,
             disallow_hidpi: false,
             has_shadow: true,
-            ignore_alt_modifier: false,
+            option_alternative_input: true,
         }
     }
 }
@@ -1150,9 +1150,9 @@ impl WindowExtMacOS for UnownedWindow {
     }
 
     #[inline]
-    fn set_option_as_alt(&self, option_as_alt: bool) {
+    fn set_option_alternative_input(&self, option_alternative_input: bool) {
         unsafe {
-            set_option_as_alt(*self.ns_view, option_as_alt);
+            set_option_alternative_input(*self.ns_view, option_alternative_input);
         }
     }
 }

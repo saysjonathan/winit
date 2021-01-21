@@ -54,9 +54,11 @@ pub(super) struct ViewState {
     ns_window: id,
     pub cursor_state: Arc<Mutex<CursorState>>,
     ime_spot: Option<(f64, f64)>,
+    raw_characters: Option<String>,
+    is_key_down: bool,
     pub(super) modifiers: ModifiersState,
     tracking_rect: Option<NSInteger>,
-    ignore_alt_modifier: bool,
+    option_alternative_input: bool,
 }
 
 impl ViewState {
@@ -75,9 +77,11 @@ pub fn new_view(
         ns_window,
         cursor_state,
         ime_spot: None,
+        raw_characters: None,
+        is_key_down: false,
         modifiers: Default::default(),
         tracking_rect: None,
-        ignore_alt_modifier: pl_attribs.ignore_alt_modifier,
+        option_alternative_input: pl_attribs.option_alternative_input,
     };
     unsafe {
         // This is free'd in `dealloc`
@@ -101,10 +105,10 @@ pub unsafe fn set_ime_position(ns_view: id, input_context: id, x: f64, y: f64) {
     let _: () = msg_send![input_context, invalidateCharacterCoordinates];
 }
 
-pub unsafe fn set_option_as_alt(ns_view: id, option_as_alt: bool) {
+pub unsafe fn set_option_alternative_input(ns_view: id, option_alternative_input: bool) {
     let state_ptr: *mut c_void = *(*ns_view).get_mut_ivar("winitState");
     let state = &mut *(state_ptr as *mut ViewState);
-    state.ignore_alt_modifier = option_as_alt;
+    state.option_alternative_input = option_alternative_input;
 }
 
 struct ViewClass(*const Class);
@@ -167,6 +171,10 @@ lazy_static! {
                 as extern "C" fn(&Object, Sel, NSRange, *mut c_void) -> id,
         );
         decl.add_method(
+            sel!(insertText:replacementRange:),
+            insert_text as extern "C" fn(&Object, Sel, id, NSRange),
+        );
+        decl.add_method(
             sel!(characterIndexForPoint:),
             character_index_for_point as extern "C" fn(&Object, Sel, NSPoint) -> NSUInteger,
         );
@@ -174,6 +182,10 @@ lazy_static! {
             sel!(firstRectForCharacterRange:actualRange:),
             first_rect_for_character_range
                 as extern "C" fn(&Object, Sel, NSRange, *mut c_void) -> NSRect,
+        );
+        decl.add_method(
+            sel!(doCommandBySelector:),
+            do_command_by_selector as extern "C" fn(&Object, Sel, Sel),
         );
         decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, id));
@@ -493,6 +505,81 @@ extern "C" fn first_rect_for_character_range(
     }
 }
 
+extern "C" fn insert_text(this: &Object, _sel: Sel, string: id, _replacement_range: NSRange) {
+    println!("ReceivedCharacter: Insert Text");
+    trace!("Triggered `insertText`");
+    unsafe {
+        let state_ptr: *mut c_void = *this.get_ivar("winitState");
+        let state = &mut *(state_ptr as *mut ViewState);
+
+        let has_attr = msg_send![string, isKindOfClass: class!(NSAttributedString)];
+        let characters = if has_attr {
+            // This is a *mut NSAttributedString
+            msg_send![string, string]
+        } else {
+            // This is already a *mut NSString
+            string
+        };
+
+        let slice =
+            slice::from_raw_parts(characters.UTF8String() as *const c_uchar, characters.len());
+        let string = str::from_utf8_unchecked(slice);
+        state.is_key_down = true;
+
+        // We don't need this now, but it's here if that changes.
+        //let event: id = msg_send![NSApp(), currentEvent];
+
+        let mut events = VecDeque::with_capacity(characters.len());
+        for character in string.chars().filter(|c| !is_corporate_character(*c)) {
+            events.push_back(EventWrapper::StaticEvent(Event::WindowEvent {
+                window_id: WindowId(get_window_id(state.ns_window)),
+                event: WindowEvent::ReceivedCharacter(character),
+            }));
+        }
+
+        AppState::queue_events(events);
+    }
+    trace!("Completed `insertText`");
+}
+
+extern "C" fn do_command_by_selector(this: &Object, _sel: Sel, command: Sel) {
+    println!("ReceivedCharacter: Do Command");
+    trace!("Triggered `doCommandBySelector`");
+    // Basically, we're sent this message whenever a keyboard event that doesn't generate a "human readable" character
+    // happens, i.e. newlines, tabs, and Ctrl+C.
+    unsafe {
+        let state_ptr: *mut c_void = *this.get_ivar("winitState");
+        let state = &mut *(state_ptr as *mut ViewState);
+
+        let mut events = VecDeque::with_capacity(1);
+        if command == sel!(insertNewline:) {
+            // The `else` condition would emit the same character, but I'm keeping this here both...
+            // 1) as a reminder for how `doCommandBySelector` works
+            // 2) to make our use of carriage return explicit
+            events.push_back(EventWrapper::StaticEvent(Event::WindowEvent {
+                window_id: WindowId(get_window_id(state.ns_window)),
+                event: WindowEvent::ReceivedCharacter('\r'),
+            }));
+        } else {
+            let raw_characters = state.raw_characters.take();
+            if let Some(raw_characters) = raw_characters {
+                for character in raw_characters
+                    .chars()
+                    .filter(|c| !is_corporate_character(*c))
+                {
+                    events.push_back(EventWrapper::StaticEvent(Event::WindowEvent {
+                        window_id: WindowId(get_window_id(state.ns_window)),
+                        event: WindowEvent::ReceivedCharacter(character),
+                    }));
+                }
+            }
+        };
+
+        AppState::queue_events(events);
+    }
+    trace!("Completed `doCommandBySelector`");
+}
+
 fn get_characters(event: id, ignore_modifiers: bool) -> String {
     unsafe {
         let characters: id = if ignore_modifiers {
@@ -563,19 +650,25 @@ fn update_potentially_stale_modifiers(state: &mut ViewState, event: id) {
 }
 
 extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+    println!("ReceivedCharacter: DOWN DOWN DOWN");
     trace!("Triggered `keyDown`");
     unsafe {
         let state_ptr: *mut c_void = *this.get_ivar("winitState");
         let state = &mut *(state_ptr as *mut ViewState);
         let window_id = WindowId(get_window_id(state.ns_window));
-        let ev_mods = event_mods(event);
-        let characters = get_characters(
-            event,
-            state.ignore_alt_modifier && ev_mods.alt() && !ev_mods.ctrl(),
-        );
+        let mods = event_mods(event);
+        let ignore_modifiers = !state.option_alternative_input && mods.alt() && !mods.ctrl();
+        println!("ReceivedCharacter: Ignoring: {}", ignore_modifiers);
+        let characters = get_characters(event, ignore_modifiers);
+        println!("ReceivedCharacter: String: {}", characters);
+
+        // TODO: Do we always want with mods here?
+        state.raw_characters = Some(characters.clone());
 
         let scancode = get_scancode(event) as u32;
         let virtual_keycode = retrieve_keycode(event);
+
+        let is_repeat = msg_send![event, isARepeat];
 
         update_potentially_stale_modifiers(state, event);
 
@@ -588,18 +681,35 @@ extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
                     state: ElementState::Pressed,
                     scancode,
                     virtual_keycode,
-                    modifiers: ev_mods,
+                    modifiers: event_mods(event),
                 },
                 is_synthetic: false,
             },
         };
 
-        AppState::queue_event(EventWrapper::StaticEvent(window_event));
-        for character in characters.chars().filter(|c| !is_corporate_character(*c)) {
-            AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
-                window_id,
-                event: WindowEvent::ReceivedCharacter(character),
-            }));
+        let pass_along = {
+            AppState::queue_event(EventWrapper::StaticEvent(window_event));
+            // Emit `ReceivedCharacter` directly for repeated keys and keys ignoring the modifier
+            // to skip the `input_text` processing.
+            if (is_repeat && state.is_key_down) || ignore_modifiers {
+                for character in characters.chars().filter(|c| !is_corporate_character(*c)) {
+                    AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::ReceivedCharacter(character),
+                    }));
+                }
+                false
+            } else {
+                true
+            }
+        };
+
+        if pass_along {
+            // Some keys (and only *some*, with no known reason) don't trigger `insertText`, while others do...
+            // So, we don't give repeats the opportunity to trigger that, since otherwise our hack will cause some
+            // keys to generate twice as many characters.
+            let array: id = msg_send![class!(NSArray), arrayWithObject: event];
+            let _: () = msg_send![this, interpretKeyEvents: array];
         }
     }
     trace!("Completed `keyDown`");
@@ -610,6 +720,8 @@ extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
     unsafe {
         let state_ptr: *mut c_void = *this.get_ivar("winitState");
         let state = &mut *(state_ptr as *mut ViewState);
+
+        state.is_key_down = false;
 
         let scancode = get_scancode(event) as u32;
         let virtual_keycode = retrieve_keycode(event);
